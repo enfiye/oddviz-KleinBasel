@@ -12,7 +12,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
-window.__SEAMV = '1788111526';
+window.__SEAMV = '1788112079';
 // QUALITY TIERS (Dele 2026-08-30): LOW is the default and must run on
 // laptops and phones; HIGH is the full installation render, one click away.
 let QUALITY = 'low';
@@ -244,7 +244,7 @@ const COUPLE = 2.4, MAXY = 1.8;
 
 const manifest = await (await fetch('./manifest.json')).json();
 document.title = 'kleinbasel';
-document.getElementById('title').textContent = 'KLEINBASEL — THE BANK';
+document.getElementById('title').textContent = 'KLEIN BASEL — ODDVIZ';
 const loader = new GLTFLoader();
 // LOW loads ETC1S/KTX2-compressed parts: ~6x less texture VRAM, GPU-native
 const ktx2 = new KTX2Loader()
@@ -698,7 +698,7 @@ async function startTrack(i) {
     ? Math.min(13, waterBaseY +
         Math.max(...moodTarget.frames.map((f) => f.datum)) * 0.5)
     : waterBaseY;
-  tTitle.textContent = TRACKS[trackIdx][1] + ' \u2014 delememed';
+  tTitle.textContent = TRACKS[trackIdx][1];
   playing = true; bPlay.textContent = '\u25A0';
   const my = ++startId;
   const data = await loadSong('./music/' + TRACKS[trackIdx][0]);
@@ -743,7 +743,7 @@ function armAudio() {
 bPlay.onclick = () => { armAudio(); playing ? stopAll() : startTrack(trackIdx); };
 document.getElementById('bPrev').onclick = () => { armAudio(); startTrack(trackIdx - 1); };
 document.getElementById('bNext').onclick = () => { armAudio(); startTrack(trackIdx + 1); };
-tTitle.textContent = TRACKS[trackIdx][1] + ' — delememed';
+tTitle.textContent = TRACKS[trackIdx][1];
 {
   const gate = document.getElementById('gate');
   document.getElementById('gEnter').onclick = () => {
