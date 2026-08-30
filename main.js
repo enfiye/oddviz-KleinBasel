@@ -12,7 +12,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
-window.__SEAMV = '1788112775';
+window.__SEAMV = '1788126166';
 // QUALITY TIERS (Dele 2026-08-30): LOW is the default and must run on
 // laptops and phones; HIGH is the full installation render, one click away.
 // default tier (Dele): phones and laptops LOW, desktops HIGH. A browser
@@ -39,7 +39,26 @@ if (!QUALITY) {
   QUALITY = (!mobileUA && desktopGPU) ? 'high' : 'low';
   console.log('auto tier:', QUALITY, '(gpu: ' + gpu + ')');
 }
-const HI = QUALITY === 'high';
+const HI0 = QUALITY === 'high';
+// RENDER MODE (Phase 3): deterministic offline stepping for the 4K film.
+// Ultra settings ride the HIGH path; the loop below drives time itself.
+const RQ = new URLSearchParams(location.search);
+const RENDER_MODE = RQ.get('render') !== null;
+const HI = HI0 || RENDER_MODE;
+const R_SONG = parseInt(RQ.get('render') || '0', 10) || 0;
+const R_START = parseFloat(RQ.get('start') || '0');
+const R_DUR = parseFloat(RQ.get('dur') || '10');
+const R_FPS = parseInt(RQ.get('fps') || '60', 10);
+const R_TAKE = (RQ.get('take') || 'sample').replace(/[^\w\-]/g, '');
+// The film programme IS the website (Dele 2026-08-30: "website and the
+// film should be same so I can see how the film will look") - shortened
+// versions regenerated from the jw_music masters with fewer loops, the
+// album masters untouched. The full-length album stays at ?album=pegel.
+const MUSIC_DIR = RQ.get('album') === 'pegel' ? 'music' : 'music_film';
+const R_SUB = parseInt(RQ.get('sub') || '4', 10);   // motion-blur substeps
+const R_W = 3840, R_H = 2160;
+const R_SS = parseFloat(RQ.get('ss') || '1.25');    // supersampling factor
+let renderT = 0;                     // the virtual song clock
 
 // ---------------------------------------------------------------- scene --
 const canvas = document.getElementById('c');
@@ -132,28 +151,38 @@ scene.add(sun, hemi);
 scene.fog = new THREE.FogExp2(0xb8c2ca, 0.0);   // density driven by mood
 const fogColor = scene.fog.color;
 const rain = (() => {
-  // POURING rain (Dele: "make it pour") - long slanted streaks, dense and
-  // fast; 1 m whisper lines were invisible from 100 m up
+  // POURING rain, take two (Dele 2026-08-30: "a better rain animation") -
+  // three depth layers instead of one flat sheet: a near quarter of long
+  // fast bright streaks, a mid band, and a dim slow far veil. Each streak
+  // fades toward its own tail (vertex colour), and the wind GUSTS - slant
+  // and opacity breathe in tick() instead of holding a constant lean.
   const N = HI ? 6000 : 3000, pos = new Float32Array(N * 6), vel = new Float32Array(N);
-  const lens = new Float32Array(N);
-  const SLANT = 0.22;   // wind lean, x per unit of length
+  const lens = new Float32Array(N), col = new Float32Array(N * 6);
+  const SLANT = 0.22;   // mean wind lean, x per unit of length
   for (let i = 0; i < N; i++) {
     const x = -124 + (Math.random() - 0.5) * 360;
     const y = Math.random() * 160;
     const z = 36 + (Math.random() - 0.5) * 360;
-    lens[i] = 4.5 + Math.random() * 4.5;
+    const u = Math.random();   // depth layer: near 25% / mid 35% / far 40%
+    let b;
+    if (u < 0.25) { b = 1.0; lens[i] = 6.5 + Math.random() * 3.5; vel[i] = 90 + Math.random() * 30; }
+    else if (u < 0.6) { b = 0.6; lens[i] = 4.5 + Math.random() * 2.5; vel[i] = 72 + Math.random() * 18; }
+    else { b = 0.3; lens[i] = 2.5 + Math.random() * 2.0; vel[i] = 55 + Math.random() * 15; }
     pos.set([x, y, z, x + lens[i] * SLANT, y + lens[i], z], i * 6);
-    vel[i] = 65 + Math.random() * 35;
+    col.set([b, b, b, b * 0.35, b * 0.35, b * 0.35], i * 6);   // head bright, tail faint
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   const m = new THREE.LineSegments(g, new THREE.LineBasicMaterial({
-    color: 0xe8f2f4, transparent: true, opacity: 0, depthWrite: false }));
+    color: 0xe8f2f4, vertexColors: true, transparent: true, opacity: 0, depthWrite: false }));
   m.frustumCulled = false; m.visible = false;
   scene.add(m);
   m.userData.vel = vel; m.userData.lens = lens; m.userData.slant = SLANT;
   return m;
 })();
+let rainWet = 0;             // how wet the stone is: soaks with rain, dries in ~45 s
+const rainUni = { value: 0 };
 let flashT = 0;
 
 // (splash effect removed - Dele 2026-08-30: it read as a childish disc)
@@ -171,7 +200,7 @@ const water = new Water2(new THREE.PlaneGeometry(12000, 12000), {
   flowDirection: new THREE.Vector2(0, 1),   // corrected after camera setup
   flowSpeed: 0,   // the song drives the speed from tick(); internal update adds zero
   reflectivity: 0.10,
-  scale: 850,
+  scale: 850,   // the approved surface (Dele: only the RAIN ripples were too big)
   normalMap0: new THREE.TextureLoader().load('./tex/Water_1_M_Normal.jpg',
     (t) => { t.wrapS = t.wrapT = THREE.RepeatWrapping; }),
   normalMap1: new THREE.TextureLoader().load('./tex/Water_2_M_Normal.jpg',
@@ -182,15 +211,125 @@ scene.add(water);   // height set after the manifest loads
 // THE DEEP: a second, murky, motionless water at the true datum (y = 0),
 // far below the glassy river - seen through it, the channel gains depth,
 // an empty dark space hanging between the two surfaces
-const deepWater = new THREE.Mesh(
-  new THREE.PlaneGeometry(12000, 12000),
-  new THREE.MeshStandardMaterial({ color: 0x12897a, roughness: 0.92,
-    metalness: 0.0, envMapIntensity: 0.35 }));
-deepWater.rotation.x = -Math.PI / 2;
-deepWater.position.y = 2.5;   // the scattering ground: refraction shows THIS
-                              // turquoise through the surface (the print's colour)
-deepWater.receiveShadow = true;
-scene.add(deepWater);
+// THE MILK (Dele 2026-08-30: "look at some photos of rhein and perfect the
+// water"): the real Rhine at this very bank (Wikimedia, Rheinschwimmen
+// photos, medians sampled) is a MILKY desaturated grey-jade - #70939b deep,
+// #527d75 near shore - and hides its bottom within a couple of metres.
+// The deep layer and everything drowned converge on this milk; it carries
+// 45% of the song's own tint and follows the song's brightness.
+const RHINE_MILK = new THREE.Color(0x84a8a1);   // measured medians, lifted
+const MILK_LUM = 0.614;                          // luminance of RHINE_MILK
+const milkColor = new THREE.Color();
+const waterColUni = { value: new THREE.Color(0x84a8a1) };
+const deepColUni = { value: new THREE.Color(0x10504e) };
+const milkUni = { value: 0 };   // per-song: 1 = drowned geometry dissolves
+const MURK = new THREE.Color(0x3c4a42);   // the grey-green of true depth
+const sunTint = new THREE.Color();
+const WHITE_C = new THREE.Color(0xffffff);
+function updateMilk() {
+  const lm = moodWaterColor.r * 0.299 + moodWaterColor.g * 0.587 +
+             moodWaterColor.b * 0.114;
+  milkColor.copy(RHINE_MILK).multiplyScalar(lm / MILK_LUM)
+    .lerp(moodWaterColor, 0.45);
+  waterColUni.value.copy(milkColor);
+  // the empty middle channel reads a tint DARKER than the water over the
+  // sand banks (Dele 2026-08-30) - depth, not brightness, marks the deep
+  // brightness follows the sun's strength AND its height - at pegel/naht's
+  // low sun the deep was staying midday-bright ("middle is too light")
+  const sunProxy = (0.25 + 0.75 * Math.min(1, moodCur.sunInt / 5)) *
+                   (0.6 + 0.4 * Math.min(1, moodCur.el / 35));
+  // darker and MURKIER (Dele 2026-08-31): the deep leans toward grey-green
+  // murk instead of clean teal, and sits a quarter darker
+  // milk also LIGHTENS the deep (Dele 2026-08-31: pegel "too dark in
+  // general, huge contrast with the banks") - at milk 1 the whole flooded
+  // surface converges to a much brighter value; other songs (milk 0) keep 0.30
+  deepColUni.value.copy(milkColor).lerp(MURK, 0.4)
+    .multiplyScalar((0.30 + 0.5 * (moodCur.milk || 0)) * sunProxy);
+  // and the deep takes the SUN'S OWN TINT (65% strength): at sunset the
+  // lit shallows warm while an untinted deep stayed cool - the "two
+  // distinct colors" of pegel and naht. White midday sun changes nothing.
+  const tm = Math.max(moodSunColor.r, moodSunColor.g, moodSunColor.b);
+  if (tm > 0) {
+    sunTint.copy(moodSunColor).multiplyScalar(1 / tm).lerp(WHITE_C, 0.5);
+    deepColUni.value.multiply(sunTint);
+  }
+}
+// THE SHARED WATER HOOK - wet band, rain wetness, milk-with-depth, and the
+// post-lighting convergence onto the deep colour. Used by every bank piece
+// AND the riverbed, so drowned scan and bed read as ONE body.
+const wetHook = (sh) => {
+  sh.uniforms.uWaterY = waterUni;
+  sh.uniforms.uRain = rainUni;
+  sh.uniforms.uWaterCol = waterColUni;
+  sh.uniforms.uDeepCol = deepColUni;
+  sh.uniforms.uMilk = milkUni;
+  sh.vertexShader = sh.vertexShader
+    .replace('#include <common>', '#include <common>\nvarying float vWetWY;')
+    .replace('#include <begin_vertex>',
+      '#include <begin_vertex>\nvWetWY = (modelMatrix * vec4(position, 1.0)).y;');
+  sh.fragmentShader = sh.fragmentShader
+    .replace('#include <common>',
+      '#include <common>\nvarying float vWetWY;\nuniform float uWaterY;\nuniform float uRain;\nuniform vec3 uWaterCol;\nuniform vec3 uDeepCol;\nuniform float uMilk;')
+    .replace('#include <color_fragment>',
+      '#include <color_fragment>\n' +
+      'float wetA = smoothstep(uWaterY + 0.6, uWaterY + 0.08, vWetWY);\n' +
+      'diffuseColor.rgb *= mix(1.0, 0.62, wetA);\n' +
+      'diffuseColor.rgb *= mix(1.0, 0.74, uRain);\n' +
+      // drowned stone milks with depth but stays VISIBLE (Dele
+      // 2026-08-30: "I liked seeing what was below water")
+      'float subm = smoothstep(uWaterY - 0.15, uWaterY - 2.6, vWetWY);\n' +
+      'diffuseColor.rgb = mix(diffuseColor.rgb, uWaterCol, subm * mix(0.78, 0.97, uMilk));')
+    // and AFTER lighting, deep geometry converges onto the deep colour -
+    // one continuous deepening, driven by real depth
+    .replace('#include <opaque_fragment>',
+      'float dsub = max(smoothstep(uWaterY - 0.5, uWaterY - 2.5, vWetWY),\n' +
+      '                 uMilk * smoothstep(uWaterY - 0.2, uWaterY - 1.2, vWetWY));\n' +
+      'outgoingLight = mix(outgoingLight, uDeepCol, dsub);\n' +
+      // water scatters light into shadows: a submerged surface cannot go
+      // far darker than the deep colour (pegel's flooded banks sat in the
+      // low sun's shadow and went near-BLACK against the lighter middle).
+      // The floor ramps from the WATERLINE itself - dsub starts too deep
+      // and left the top half-metre of drowned bank pitch black
+      'float sfloor = smoothstep(uWaterY - 0.05, uWaterY - 0.7, vWetWY);\n' +
+      'outgoingLight = max(outgoingLight, uDeepCol * sfloor);\n' +
+      '#include <opaque_fragment>')
+    .replace('#include <roughnessmap_fragment>',
+      '#include <roughnessmap_fragment>\n' +
+      'float wetR = smoothstep(uWaterY + 0.6, uWaterY + 0.08, vWetWY);\n' +
+      'roughnessFactor = mix(roughnessFactor, roughnessFactor * 0.45, wetR);\n' +
+      'roughnessFactor *= mix(1.0, 0.55, uRain);');
+};
+// THE RIVERBED (Dele 2026-08-31: "the geography should solve it") - a real
+// bed instead of a flat colour sheet: 669k scanned bank vertices binned to
+// a 4 m heightfield; past the scan's edge the bed falls at 0.35 m per m of
+// distance from the nearest bank, down to 1.3 m in the middle. The depth
+// fades above then paint the bank-to-middle gradient on their own.
+const bedData = await (await fetch('./bed.json')).json();
+const bedMat = new THREE.MeshStandardMaterial({ color: 0x2e3d38,
+  roughness: 1.0, metalness: 0.0, envMapIntensity: 0.0 });
+  // dark wet-riverbed tone (was sandy 0x7d8478 - Dele 2026-08-31: "darken
+  // the artificial middle river, it is still very bright"); the scan's own
+  // shelves keep their real texture, only the synthetic bed darkens
+bedMat.onBeforeCompile = wetHook;
+{
+  const { X0, Z0, STEP, NX, NZ, bed } = bedData;
+  const g = new THREE.PlaneGeometry((NX - 1) * STEP, (NZ - 1) * STEP, NX - 1, NZ - 1);
+  const bpa = g.attributes.position;
+  for (let i = 0; i < bpa.count; i++) {
+    const ix = i % NX, iz = (i / NX) | 0;
+    bpa.setXYZ(i, X0 + (ix + 0.5) * STEP, bed[iz * NX + ix], Z0 + (iz + 0.5) * STEP);
+  }
+  g.computeVertexNormals();
+  const bedMesh = new THREE.Mesh(g, bedMat);
+  bedMesh.receiveShadow = true;
+  scene.add(bedMesh);
+  // beyond the surveyed grid the river is simply deep
+  const skirt = new THREE.Mesh(new THREE.PlaneGeometry(12000, 12000), bedMat);
+  skirt.rotation.x = -Math.PI / 2;
+  skirt.position.y = 1.29;
+  skirt.receiveShadow = true;
+  scene.add(skirt);
+}
 const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(sky).texture;
 await readBank();
@@ -222,15 +361,47 @@ water.material.onBeforeCompile = (sh) => {
   sh.uniforms.sunDirW = { value: new THREE.Vector3(0, 1, 0) };
   sh.uniforms.sunColW = { value: new THREE.Color(0xffffff) };
   sh.uniforms.glint = { value: 0.6 };
+  sh.uniforms.rainAmt = { value: 0 };
+  sh.uniforms.rainT = { value: 0 };
+  sh.uniforms.milkW = milkUni;   // milk also mattes the MIRROR (pegel)
   water.userData.glintU = sh.uniforms;
   sh.fragmentShader = sh.fragmentShader
     .replace('uniform float reflectivity;',
-      'uniform float reflectivity;\nuniform vec3 sunDirW;\nuniform vec3 sunColW;\nuniform float glint;')
+      'uniform float reflectivity;\nuniform vec3 sunDirW;\nuniform vec3 sunColW;\nuniform float glint;\nuniform float rainAmt;\nuniform float rainT;\nuniform float milkW;')
+    // RAIN ON THE WATER: a high-frequency fast-drifting normal layer (the
+    // same two maps at 6x/9.5x tiling) blended in by rain amount - the
+    // surface dances under the drops instead of staying glassy
+    .replace('vec3 normal = normalize( vec3( normalColor.r * 2.0 - 1.0, normalColor.b,  normalColor.g * 2.0 - 1.0 ) );',
+      'vec3 normal = normalize( vec3( normalColor.r * 2.0 - 1.0, normalColor.b,  normalColor.g * 2.0 - 1.0 ) );\n' +
+      'if ( rainAmt > 0.001 ) {\n' +
+      '  vec4 rn0 = texture2D( tNormalMap0, vUv * scale * 20.0 + vec2( 0.13, 0.31 ) * rainT );\n' +
+      '  vec4 rn1 = texture2D( tNormalMap1, vUv * scale * 32.0 + vec2( -0.21, 0.17 ) * rainT );\n' +
+      '  vec3 rainN = normalize( vec3( rn0.r + rn1.r - 1.0, rn0.b + rn1.b, rn0.g + rn1.g - 1.0 ) );\n' +
+      '  normal = normalize( mix( normal, rainN, 0.55 * rainAmt ) );\n' +
+      '}')
+    // rain scatters the mirror: the surface goes matte as it pours
+    .replace('float reflectance = reflectivity + ( 1.0 - reflectivity ) * pow( ( 1.0 - theta ), 5.0 );',
+      // grazing-angle cap (Dele 2026-08-31): pure fresnel turns the FAR
+      // water into a sky mirror and washes the distant middle out pale;
+      // his print keeps saturated teal into the distance, so cap it
+      // milk mattes the mirror too: at pegel's dim dusk the refraction is
+      // dark and the bank reflections showed as the stubborn side bands
+      'float reflectance = min( 0.35, reflectivity + ( 1.0 - reflectivity ) * pow( ( 1.0 - theta ), 5.0 ) ) * ( 1.0 - 0.55 * rainAmt ) * ( 1.0 - 0.75 * milkW );')
     .replace('gl_FragColor = vec4( color, 1.0 ) * mix( refractColor, reflectColor, reflectance );',
+      // the HDR sky in the reflection washes the far water out pale even
+      // at low reflectance - clamp what the mirror may carry; darker bank
+      // reflections pass untouched (Dele: the print stays teal at distance)
+      // ...and a dark reflection (the shadowed bank walls at pegel's dusk
+      // flood) may not drag the water to black either: floor it against
+      // the refracted colour, so near-bank water stays WATER-coloured
+      'reflectColor.rgb = clamp( reflectColor.rgb, refractColor.rgb * 0.6, vec3( 0.85 ) );\n' +
       'gl_FragColor = vec4( color, 1.0 ) * mix( refractColor, reflectColor, reflectance );\n' +
+      // the deep channel is a uniform colour, so bent rays alone show
+      // nothing there - the dancing rain normal must also SHIMMER
+      'gl_FragColor.rgb *= 1.0 + rainAmt * 0.28 * ( normal.x + normal.z );\n' +
       'vec3 hw = normalize( toEye + sunDirW );\n' +
       'float sparkle = pow( max( dot( normal, hw ), 0.0 ), 240.0 );\n' +
-      'gl_FragColor.rgb += sunColW * sparkle * glint;');
+      'gl_FragColor.rgb += sunColW * sparkle * glint * ( 1.0 - 0.8 * rainAmt );');
 };
 water.material.needsUpdate = true;
 // stock 0.15 cycle - a bigger cycle made the crossfade read as the water
@@ -298,24 +469,7 @@ const loadOne = (rec) => new Promise((res) => {
         // WET BAND: stone darkens and glosses within ~0.6 m of the
         // waterline (and below it) - grounds the floods
         // (strike light-pulse removed - Dele didn't like it)
-        o.material.onBeforeCompile = (sh) => {
-          sh.uniforms.uWaterY = waterUni;
-          sh.vertexShader = sh.vertexShader
-            .replace('#include <common>', '#include <common>\nvarying float vWetWY;')
-            .replace('#include <begin_vertex>',
-              '#include <begin_vertex>\nvWetWY = (modelMatrix * vec4(position, 1.0)).y;');
-          sh.fragmentShader = sh.fragmentShader
-            .replace('#include <common>',
-              '#include <common>\nvarying float vWetWY;\nuniform float uWaterY;')
-            .replace('#include <color_fragment>',
-              '#include <color_fragment>\n' +
-              'float wetA = smoothstep(uWaterY + 0.6, uWaterY + 0.08, vWetWY);\n' +
-              'diffuseColor.rgb *= mix(1.0, 0.62, wetA);')
-            .replace('#include <roughnessmap_fragment>',
-              '#include <roughnessmap_fragment>\n' +
-              'float wetR = smoothstep(uWaterY + 0.6, uWaterY + 0.08, vWetWY);\n' +
-              'roughnessFactor = mix(roughnessFactor, roughnessFactor * 0.45, wetR);');
-        };
+        o.material.onBeforeCompile = wetHook;
         mats.push(o.material);
       }
     });
@@ -343,6 +497,180 @@ centroid.multiplyScalar(1 / Math.max(1, parts.length));
 document.getElementById('gLoad').textContent = 'the bank is assembled';
 document.getElementById('gEnter').classList.add('ready');
 if (KIOSK) setTimeout(() => document.getElementById('gEnter').click(), 800);
+if (RENDER_MODE) setTimeout(runRender, 600);
+
+// ==================== THE RENDER LOOP (Phase 3) ====================
+// a hung upload once froze a render at frame 143 forever - every POST now
+// carries a timeout and retries; a render must survive its own plumbing
+async function postWithRetry(url, body) {
+  for (let a = 0; a < 5; a++) {
+    try {
+      const ctl = new AbortController();
+      const to = setTimeout(() => ctl.abort(), 15000);
+      const res = await fetch(url, { method: 'POST', body, signal: ctl.signal });
+      clearTimeout(to);
+      if (res.ok) return;
+    } catch (e) {}
+    await new Promise((r) => setTimeout(r, 500 * (a + 1)));
+  }
+  throw new Error('upload failed after retries: ' + url);
+}
+async function runRender() {
+  const RCV = 'http://localhost:8091';
+  const gate = document.getElementById('gate');
+  if (gate) gate.remove();
+  document.body.classList.add('entered');
+  document.documentElement.classList.add('kiosk');   // no chrome in frames
+  // load the song's score and world without any AudioContext
+  trackIdx = ((R_SONG % TRACKS.length) + TRACKS.length) % TRACKS.length;
+  moodTarget = SONGS[TRACKS[trackIdx][0]] || null;
+  levelTarget = moodTarget
+    ? Math.min(13, waterBaseY +
+        Math.max(...moodTarget.frames.map((f) => f.datum)) * 0.5)
+    : waterBaseY;
+  water.position.y = levelTarget;    // arrive settled, no glide
+  const data = await loadSong('./' + MUSIC_DIR + '/' + TRACKS[trackIdx][0]);
+  song = { notes: data.notes, dur: data.dur, vmax: data.vmax,
+           master: null, tap: null };
+  playDur = data.dur;
+  playing = true;
+  // settle the mood exactly at the start position
+  renderT = Math.max(0, R_START);
+  const mt = songMoodAt(moodTarget, Math.min(1, renderT / Math.max(1, playDur)));
+  for (const key of MKEYS) moodCur[key] = mt[key];
+  moodSunColor.copy(tmpSunC);
+  moodWaterColor.copy(tmpWaterC);
+  // pre-roll: strikes of the previous 6 s put the springs in motion
+  visPtr = 0;
+  while (visPtr < song.notes.length && song.notes[visPtr].sec < renderT - 6) visPtr++;
+  const pre0 = visPtr;
+  window.__renderDt = 1 / 30;
+  for (let t = renderT - 6; t < renderT; t += 1 / 30) {
+    renderT = Math.max(0, t);
+    tick();
+  }
+  renderT = Math.max(0, R_START);
+  // ultra frame: supersampled 4K
+  const w = Math.round(R_W * R_SS), h = Math.round(R_H * R_SS);
+  renderer.setPixelRatio(1);
+  renderer.setSize(w, h, false);
+  composer.setSize(w, h);
+  camera.aspect = R_W / R_H;
+  camera.updateProjectionMatrix();
+  const acc = document.createElement('canvas');
+  acc.width = R_W; acc.height = R_H;
+  const actx = acc.getContext('2d');
+  const frames = Math.round(R_DUR * R_FPS);
+  const status = document.getElementById('status');
+  for (let f = 0; f < frames; f++) {
+    // half shutter: substeps across the first half of the frame interval
+    actx.globalAlpha = 1;
+    for (let sub = 0; sub < R_SUB; sub++) {
+      window.__renderDt = (0.5 / R_FPS) / R_SUB;
+      renderT += window.__renderDt;
+      tick();
+      composer.render();
+      actx.globalAlpha = 1 / (sub + 1);
+      actx.drawImage(canvas, 0, 0, R_W, R_H);
+    }
+    // shutter closed: simulate the second half without rendering
+    window.__renderDt = 0.5 / R_FPS;
+    renderT += window.__renderDt;
+    tick();
+    const blob = await new Promise((r) => acc.toBlob(r, 'image/jpeg', 0.95));
+    await postWithRetry(RCV + '/frame?take=' + R_TAKE + '&n=' + f, blob);
+    if (status && f % 10 === 0) {
+      status.textContent = 'rendering ' + f + ' / ' + frames;
+      document.title = 'render ' + f + '/' + frames;
+    }
+  }
+  // sound: the same score, sample-accurate, rendered offline
+  status.textContent = 'rendering sound\u2026';
+  const wav = await renderAudioWindow(song, R_START, R_DUR + 2.0);
+  await postWithRetry(RCV + '/audio?take=' + R_TAKE, wav);
+  status.textContent = 'RENDER DONE \u2014 ' + frames + ' frames';
+  document.title = 'RENDER DONE';
+}
+
+async function renderAudioWindow(sng, start, dur) {
+  const SR = 48000;
+  const off = new OfflineAudioContext(2, Math.ceil(dur * SR), SR);
+  const master = off.createGain();
+  master.gain.value = Math.min(2.2, 0.9 / sng.vmax);
+  const comp = off.createDynamicsCompressor();
+  comp.threshold.value = -14; comp.knee.value = 20;
+  comp.ratio.value = 4; comp.attack.value = 0.004; comp.release.value = 0.2;
+  master.connect(comp).connect(off.destination);
+  for (const n of sng.notes) {
+    const when = n.sec - start;
+    if (when < -0.05 || when > dur - 0.1) continue;
+    synthNoteInto(off, master, n, Math.max(0.01, when));
+  }
+  const buf = await off.startRendering();
+  return encodeWav(buf);
+}
+
+// the same voice recipes, aimed at any BaseAudioContext
+function synthNoteInto(ctx, out, n, when) {
+  const f = 440 * Math.pow(2, (n.n - 69) / 12);
+  const r = voiceRecipe(n.prog);
+  const g = ctx.createGain(), flt = ctx.createBiquadFilter();
+  flt.type = 'lowpass';
+  flt.frequency.setValueAtTime(Math.min(16000, f * r.cut), when);
+  flt.frequency.exponentialRampToValueAtTime(
+    Math.min(16000, Math.max(120, f * r.sweep)), when + r.dur * 0.7);
+  const peak = 0.1 * r.amp * (0.35 + 0.65 * n.v);
+  g.gain.setValueAtTime(0, when);
+  g.gain.linearRampToValueAtTime(peak, when + r.att);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + r.dur);
+  const oscs = [];
+  for (const [type, mult, amt] of r.waves) {
+    const o = ctx.createOscillator();
+    o.type = type; o.frequency.value = f * mult;
+    const og = ctx.createGain(); og.gain.value = amt;
+    o.connect(og).connect(flt);
+    oscs.push(o);
+  }
+  if (r.vib) {
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 5;
+    const lg = ctx.createGain(); lg.gain.value = f * 0.004;
+    lfo.connect(lg);
+    oscs.forEach((o) => lg.connect(o.frequency));
+    lfo.start(when); lfo.stop(when + r.dur + 0.2);
+  }
+  if (r.trem) {
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 4.2;
+    const lg = ctx.createGain(); lg.gain.value = peak * 0.3;
+    lfo.connect(lg).connect(g.gain);
+    lfo.start(when); lfo.stop(when + r.dur + 0.2);
+  }
+  const panner = ctx.createStereoPanner();
+  panner.pan.value = n.pan;
+  flt.connect(g).connect(panner).connect(out);
+  for (const o of oscs) { o.start(when); o.stop(when + r.dur + 0.15); }
+}
+
+function encodeWav(buf) {
+  const nCh = buf.numberOfChannels, len = buf.length, sr = buf.sampleRate;
+  const bytes = 44 + len * nCh * 2;
+  const ab = new ArrayBuffer(bytes);
+  const dv = new DataView(ab);
+  const wstr = (o, str2) => { for (let i = 0; i < str2.length; i++) dv.setUint8(o + i, str2.charCodeAt(i)); };
+  wstr(0, 'RIFF'); dv.setUint32(4, bytes - 8, true); wstr(8, 'WAVE');
+  wstr(12, 'fmt '); dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); dv.setUint16(22, nCh, true);
+  dv.setUint32(24, sr, true); dv.setUint32(28, sr * nCh * 2, true);
+  dv.setUint16(32, nCh * 2, true); dv.setUint16(34, 16, true);
+  wstr(36, 'data'); dv.setUint32(40, len * nCh * 2, true);
+  let o = 44;
+  for (let i = 0; i < len; i++) {
+    for (let c = 0; c < nCh; c++) {
+      const v = Math.max(-1, Math.min(1, buf.getChannelData(c)[i]));
+      dv.setInt16(o, v * 32767, true); o += 2;
+    }
+  }
+  return new Blob([ab], { type: 'audio/wav' });
+}
 
 // (camera is fixed from camera.json - Dele's own frame; nothing to set here)
 
@@ -434,10 +762,17 @@ async function loadSong(url) {
     }
   }
   const spb = usPerBeat / 1e6;
-  // THE SPATIAL SCORE, annotated once per song: Naht's city voice plays the
-  // LEFT bank, its water voices the RIGHT, the stitch alternates; other
-  // tracks give each channel its own stretch of the bank.
-  const isNaht = url.indexOf('naht') >= 0;
+  // THE SPATIAL CHOREOGRAPHY (rewritten 2026-08-30, Dele: both banks
+  // must dance; each piece's own idea becomes its mapping):
+  //   drift      - the walk: the beat travels the route key by key,
+  //                the answer comes from the opposite bank
+  //   zweimal    - the two passes: melody right bank, canon echo LEFT
+  //   overcast   - rain: swells scattered wide, sinking to the shores
+  //   schnitt    - the cut: one cluster splitting apart stage by stage
+  //   nachtschicht - two chords = two banks leaning into each other
+  //   pegel      - the gauge: the fifth on the two lowest sand keys
+  //   naht       - city left / water right / the stitch (kept)
+  //   others     - channel stretches (the original mapping)
   const chans = [...new Set(notes.map((n) => n.c))].sort();
   const zone = {};
   chans.forEach((c, ci) => { zone[c] = [ci / chans.length, (ci + 1) / chans.length]; });
@@ -446,21 +781,97 @@ async function loadSong(url) {
     const ns = notes.filter((n) => n.c === c).map((n) => n.n);
     lo[c] = Math.min(...ns); hi_[c] = Math.max(...ns);
   }
-  let stitchFlip = false;
-  for (const n of notes) {
-    n.sec = (n.t / tpq) * spb;
+  for (const n of notes) n.sec = (n.t / tpq) * spb;
+  const dur0 = notes.length ? notes[notes.length - 1].sec : 1;
+  const L = sideKeys.L, R = sideKeys.R;
+  const DENSE = byOrder.filter(Boolean);   // order numbering can have holes
+  const pick = (list, u) => list.length
+    ? list[Math.round(Math.min(1, Math.max(0, u)) * (list.length - 1))]
+    : null;
+  // the lowest key of each bank - the sand keys, pegel's gauges
+  const lowOf = (list) => list.length
+    ? list.reduce((a, b) => (a.restZ < b.restZ ? a : b)) : DENSE[0];
+  const sandL = lowOf(L), sandR = lowOf(R);
+  const hash01 = (x) => { let t = (x + 1) * 2654435761 % 4294967296;
+    t = (t ^ (t >>> 13)) * 1274126177 % 4294967296; return (t >>> 8) / 16777216; };
+  const isNaht = url.indexOf('naht') >= 0;
+  const isDrift = url.indexOf('drift') >= 0;
+  const isZweimal = url.indexOf('zweimal') >= 0;
+  const isOvercast = url.indexOf('overcast') >= 0;
+  const isSchnitt = url.indexOf('schnitt') >= 0;
+  const isNacht = url.indexOf('nachtschicht') >= 0;
+  const isPegel = url.indexOf('pegel') >= 0;
+  let stitchFlip = false, walkPos = 0, nachtChord = 0, nachtLastBass = -1;
+  let pegelTick = 0;
+  const mainCh = chans[0];
+  for (let ni = 0; ni < notes.length; ni++) {
+    const n = notes[ni];
     const u = (n.n - lo[n.c]) / Math.max(1, hi_[n.c] - lo[n.c]);
+    const prog = n.sec / dur0;
     n.kind = 'sharp';
-    if (isNaht && sideKeys.L.length && sideKeys.R.length) {
+    if (isNaht && L.length && R.length) {
       let list;
-      if (n.c === 2) { list = sideKeys.L; }
-      else if (n.c === 0) { list = sideKeys.R; n.kind = 'swell'; }
-      else if (n.c === 1) { list = sideKeys.R; n.kind = 'deep'; }
-      else if (n.c === 3) { list = stitchFlip ? sideKeys.L : sideKeys.R;
+      if (n.c === 2) { list = L; }
+      else if (n.c === 0) { list = R; n.kind = 'swell'; }
+      else if (n.c === 1) { list = R; n.kind = 'deep'; }
+      else if (n.c === 3) { list = stitchFlip ? L : R;
                             stitchFlip = !stitchFlip; }
       else { list = parts; n.kind = 'swell'; }
-      const p2 = list[Math.round(u * (list.length - 1))];
-      n.order = p2 ? p2.order : 0;
+      const pk = pick(list, u); n.order = pk ? pk.order : DENSE[0].order;
+    } else if (isDrift && L.length && R.length) {
+      // the walk: the beat sweeps the route; answers mirror across
+      if (n.c === mainCh) {
+        n.order = DENSE[(walkPos++) % DENSE.length].order;
+      } else {
+        const frac = (walkPos % byOrder.length) / byOrder.length;
+        const opp = (walkPos % (2 * byOrder.length)) < byOrder.length ? L : R;
+        const pk2 = pick(opp, frac); n.order = pk2 ? pk2.order : DENSE[0].order;
+        n.kind = n.prog >= 88 ? 'swell' : 'sharp';
+      }
+    } else if (isZweimal && L.length && R.length) {
+      // two passes: the first voice on the right bank, its echo LEFT
+      const pk3 = pick(n.c === mainCh ? R : L, u); n.order = pk3 ? pk3.order : DENSE[0].order;
+      n.kind = n.c === mainCh ? 'sharp' : 'swell';
+    } else if (isOvercast) {
+      // rain: scattered swells, sinking toward the shores as it pours
+      const scatter = hash01(ni);
+      const sink = Math.min(1, prog * 1.4);
+      const pool = [...parts].sort((a, b) => a.restZ - b.restZ);
+      const idx = Math.floor(scatter * (pool.length - 1) * (1 - 0.55 * sink));
+      n.order = pool[idx].order;
+      n.kind = 'swell';
+    } else if (isSchnitt) {
+      // the cut: a tight centre cluster splits wider at each stage
+      const spread = 0.08 + 0.9 * prog;
+      const vi = chans.indexOf(n.c) / Math.max(1, chans.length - 1) - 0.5;
+      const centre = 0.5 + vi * spread;
+      n.order = pick(DENSE, centre + (u - 0.5) * 0.15).order;
+      n.kind = n.prog === 14 ? 'deep' : 'sharp';
+    } else if (isNacht && L.length && R.length) {
+      // two chords leaning = the two banks leaning into each other
+      if (n.prog === 14) {                      // the bell: dead centre
+        n.order = pick(DENSE, 0.5).order;
+        n.kind = 'deep';
+      } else {
+        if (n.n <= lo[n.c] + 2 && n.n !== nachtLastBass) {
+          nachtChord = 1 - nachtChord;          // bass change flips the lean
+          nachtLastBass = n.n;
+        }
+        const pk4 = pick(nachtChord === 0 ? L : R, u); n.order = pk4 ? pk4.order : DENSE[0].order;
+        n.kind = 'swell';
+      }
+    } else if (isPegel) {
+      // the gauge: the fifth on the two sand keys, the tick above them
+      if (n.n < 60) {
+        n.order = (n.n % 2 === 0 ? sandL : sandR).order;
+        n.kind = 'deep';
+      } else if (n.prog === 14) {
+        n.order = pick(DENSE, 0.85).order;
+        n.kind = 'deep';
+      } else {
+        n.order = pick(DENSE, (pegelTick++ % 2) ? 0.32 : 0.68).order;
+        n.kind = 'sharp';
+      }
     } else {
       const [z0, z1] = zone[n.c];
       n.order = Math.round((z0 + u * (z1 - z0)) * (byOrder.length - 1));
@@ -563,7 +974,7 @@ function scheduleAhead() {
     if (++made > 240) break;    // never block a frame
   }
 }
-const TRACKS = [
+const TRACKS_ALBUM = [
   ['01_kleinbasel_drift.mid', 'kleinbasel drift'],
   ['02_overcast.mid', 'overcast'],
   ['03_nachtschicht.mid', 'nachtschicht'],
@@ -572,6 +983,20 @@ const TRACKS = [
   ['06_zweimal.mid', 'zweimal'],
   ['07_rheinschwimmen.mid', 'rheinschwimmen'],
 ];
+// THE FILM PROGRAMME (Dele 2026-08-30): ~15 min curated from BOTH albums,
+// existing compositions only (album-1 pieces at fewer of their own loops,
+// album-2 pieces verbatim). Sequenced for maximal contrast at every
+// junction - the transitions are the most interesting times.
+const TRACKS_FILM = [
+  ['01_kleinbasel_drift.mid', 'kleinbasel drift'],
+  ['06_zweimal.mid', 'zweimal'],
+  ['02_overcast.mid', 'overcast'],
+  ['a2-06_schnitt.mid', 'schnitt'],
+  ['03_nachtschicht.mid', 'nachtschicht'],
+  ['04_pegel.mid', 'pegel'],
+  ['a2-08_naht.mid', 'naht'],
+];
+const TRACKS = MUSIC_DIR === 'music_film' ? TRACKS_FILM : TRACKS_ALBUM;
 // PER-SONG VISUAL COMPOSITIONS (Dele 2026-08-30): five variables - spring,
 // river datum, river speed, time of day, weather. Camera and rest positions
 // never change. Cross-fades over ~4 s at every track change.
@@ -579,10 +1004,10 @@ const TRACKS = [
 // only the starting position. `script` keyframes (at = fraction of the song)
 // override variables cumulatively; the engine interpolates between frames,
 // so rain arrives, lightning passes, fog comes and goes - the song decides.
-const MDEF = { fog: 0, rain: 0, storm: 0, wtint: 0 };
+const MDEF = { fog: 0, rain: 0, storm: 0, wtint: 0, milk: 0 };
 const SONGS = {
   // bright midday on the bank, the water at 9 m - a gentle breathing light
-  '01_kleinbasel_drift.mid': { base: { wtint: 0.45, wcol: 0x14b39a, el: 55, az: 195, sun: 0xffffff,
+  '01_kleinbasel_drift.mid': { base: { wtint: 0.45, wcol: 0x10b3b0, el: 55, az: 195, sun: 0xffffff,
       sunInt: 4.8, hemi: 0.35, envI: 1.0, turb: 3, ray: 1.0, skyBelow: 0,
       datum: 2.1, flow: 0.25, coupling: 0.6, K: 14, damp: 4.5, imp: 0.6,
       dist: 0.5 },
@@ -590,13 +1015,13 @@ const SONGS = {
               { at: 0.55, sunInt: 5.0 },
               { at: 0.85, sun: 0xfff4e0, sunInt: 4.6 } ] },
   // grey stillness - the rain arrives mid-song, pours, breaks at the end
-  '02_overcast.mid': { base: { wtint: 0.15, wcol: 0x4a7f74, el: 45, az: 180, sun: 0xdfe3e8, sunInt: 2.2,
+  '02_overcast.mid': { base: { wtint: 0.15, wcol: 0x10b3b0, el: 45, az: 180, sun: 0xdfe3e8, sunInt: 2.2,
       hemi: 0.62, envI: 0.55, turb: 10, ray: 0.4, skyBelow: 0, datum: 2.5,
       flow: 0.35, coupling: 0.5, K: 18, damp: 6.0, imp: 0.5, dist: 0.35 },
     script: [ { at: 0.25, rain: 0.35, hemi: 0.58 },
               { at: 0.42, rain: 0.45 },
               { at: 0.5, rain: 1.0, flow: 0.55, sunInt: 2.4,
-                datum: 3.5, turb: 12, wcol: 0x33625c },
+                datum: 3.5, turb: 12, wcol: 0x2a706e },
               { at: 0.75, rain: 1.0 },
               { at: 1, rain: 0.25, sunInt: 2.8, sun: 0xf2e7d4, turb: 7 } ] },
   // the night shift - a storm crosses the far bank, then a clear moon
@@ -610,15 +1035,29 @@ const SONGS = {
               { at: 0.85, storm: 0, rain: 0, sunInt: 3.4, envI: 0.42,
                 turb: 2.5 } ] },
   // the gauge - the river rises to a crest and falls back; water IS the piece
-  '04_pegel.mid': { base: { wtint: 0.35, wcol: 0x1f8a76, el: 13, az: 250, sun: 0xff9e50, sunInt: 4.6,
-      hemi: 0.55, envI: 0.85, turb: 8, ray: 2.2, skyBelow: 0, datum: 0.5,
+  // az 250 -> 270 (Dele 2026-08-31: "move the sun to get the result you
+  // want"): side-on low sun left both inner bank walls in their own
+  // shadow - black bands; along the channel it rakes them both equally
+  // el 13 -> 22: at 13 the wall faces AND their reflections on the near-
+  // bank water went black while the middle kept its sky sheen; 22 is
+  // still golden-low but reaches the walls ("sun can be low but we must
+  // need more light" - Dele, the original pegel brief)
+  // sun softened with the move: at az 270 the whole turbid orange sky-glow
+  // mirrored on the river like embers - clearer sky, gentler gold
+  '04_pegel.mid': { base: { wtint: 0.35, wcol: 0x10b3b0, el: 22, az: 270, sun: 0xffd0a0, sunInt: 2.6,
+      milk: 1,   // the flood swallows the drowned banks - one water
+      // hemi/envI raised 2026-08-31: at el 13 the bank walls between the
+      // waterline and the lit promenade sat in shadow and read BLACK bands
+      // against the water ("almost black on the sides") - fill light is
+      // the only thing that reaches dry shadowed stone
+      hemi: 1.25, envI: 1.25, turb: 5, ray: 2.2, skyBelow: 0, datum: 0.5,
       flow: 0.2, coupling: 2.2, K: 20, damp: 6.0, imp: 0.35, dist: 0.45 },
     script: [ { at: 0.35, datum: 4, flow: 0.5, coupling: 2.6 },
-              { at: 0.6, datum: 6.5, flow: 0.9, dist: 0.8, wcol: 0x2e7257 },
+              { at: 0.6, datum: 6.5, flow: 0.9, dist: 0.8, wcol: 0x1e8a88 },
               { at: 0.72, datum: 10.1 },   // pegel +2 m total (Dele) -> level 13.00
-              { at: 1, datum: 1.5, flow: 0.25, coupling: 1.2, dist: 0.45, wcol: 0x1f8a76 } ] },
+              { at: 1, datum: 1.5, flow: 0.25, coupling: 1.2, dist: 0.45, wcol: 0x10b3b0 } ] },
   // the crossing - wind gusts mid-river, calm on arrival
-  '05_faehre.mid': { base: { wtint: 0.55, wcol: 0x0fadaa, el: 35, az: 210, sun: 0xfff0d8, sunInt: 4.5,
+  '05_faehre.mid': { base: { wtint: 0.55, wcol: 0x10b3b0, el: 35, az: 210, sun: 0xfff0d8, sunInt: 4.5,
       hemi: 0.3, envI: 0.8, turb: 4, ray: 1.2, skyBelow: 0, datum: 3.5,
       flow: 1.4, coupling: 0.7, K: 16, damp: 4.0, imp: 0.9, dist: 0.7 },
     script: [ { at: 0.3, flow: 1.8, dist: 1.1, turb: 5 },
@@ -635,7 +1074,7 @@ const SONGS = {
               { at: 0.6, rain: 0.55, turb: 5, sunInt: 4.2 },
               { at: 0.75, rain: 0, turb: 3, sunInt: 5.5, dist: 1.6 } ] },
   // the evening swim - high water, the sun sets, a strong moon rises
-  '07_rheinschwimmen.mid': { base: { wtint: 0.4, wcol: 0x189a84, el: 10, az: 235, sun: 0xffc080,
+  '07_rheinschwimmen.mid': { base: { wtint: 0.4, wcol: 0x10b3b0, el: 10, az: 235, sun: 0xffc080,
       sunInt: 4.2, hemi: 0.35, envI: 0.8, turb: 5, ray: 2.0, skyBelow: 0,
       datum: 5.0, flow: 0.8, coupling: 1.0, K: 7, damp: 2.2, imp: 0.5,
       dist: 0.6 },
@@ -644,11 +1083,32 @@ const SONGS = {
               { at: 0.75, el: 8, sunInt: 3.2, hemi: 0.38, sun: 0xd8c8b8 },
               { at: 1, el: 20, sunInt: 3.6, envI: 0.5,
                 sun: 0xc3d4f0, hemi: 0.38, flow: 0.4, wcol: 0x123f38 } ] },
+  // FILM PROGRAMME additions (album 2, existing tracks untouched):
+  // schnitt - the rain has just broken: hard washed post-rain clarity,
+  // crisp low-turbidity light, percussive springs for the marimba cuts
+  'a2-06_schnitt.mid': { base: { wtint: 0.55, wcol: 0x10b3b0, el: 48, az: 205,
+      sun: 0xfaf6ec, sunInt: 5.2, hemi: 0.4, envI: 1.0, turb: 2, ray: 0.9,
+      skyBelow: 0, datum: 7.1, flow: 0.5, coupling: 0.6, K: 30, damp: 3.0,
+      imp: 1.15, dist: 0.9 },
+    script: [ { at: 0.35, sunInt: 5.5 },
+              { at: 0.75, el: 42, sunInt: 5.0 } ] },
+  // naht - the close: sunset into blue hour while the city voice (left
+  // bank) and the water voices (right bank) meet and stitch the channel
+  'a2-08_naht.mid': { base: { wtint: 0.4, wcol: 0x10b3b0, el: 14, az: 240,
+      sun: 0xffb070, sunInt: 4.0, hemi: 0.32, envI: 0.7, turb: 6, ray: 2.0,
+      skyBelow: 0, datum: 3.1, flow: 0.35, coupling: 0.8, K: 12, damp: 3.8,
+      imp: 0.7, dist: 0.55 },
+    script: [ { at: 0.4, el: 9, sun: 0xff9a55, sunInt: 3.4 },
+              { at: 0.6, el: 6, sunInt: 3.0, hemi: 0.3 },
+              { at: 0.8, el: 12, sun: 0xd9d2e8, sunInt: 3.0, envI: 0.5,
+                turb: 3, wcol: 0x148a86 },
+              { at: 1, el: 22, sun: 0xc3d4f0, sunInt: 3.2, hemi: 0.34,
+                envI: 0.45, flow: 0.25, wcol: 0x123f38 } ] },
 };
 // resolve each script into full frames (cumulative overrides), colors baked
 const MKEYS = ['el', 'az', 'sunInt', 'hemi', 'envI', 'turb', 'ray',
   'skyBelow', 'datum', 'flow', 'coupling', 'K', 'damp', 'imp', 'dist',
-  'fog', 'rain', 'storm', 'wtint'];
+  'fog', 'rain', 'storm', 'wtint', 'milk'];
 for (const name of Object.keys(SONGS)) {
   const song = SONGS[name];
   let acc = Object.assign({}, MDEF, song.base);
@@ -666,7 +1126,7 @@ const tmpSunC = new THREE.Color();
 const tmpWaterC = new THREE.Color();
 const moodWaterColor = new THREE.Color(0x14b39a);
 const whiteTint = new THREE.Color(0xffffff);
-const idleWaterColor = new THREE.Color(0x14b39a);
+const idleWaterColor = new THREE.Color(0x10b3b0);
 function songMoodAt(song, prog) {
   const fr = song.frames;
   let i = 0;
@@ -694,7 +1154,7 @@ const IDLE_LEVEL = Math.min(13, waterBaseY +
   Math.max(...SONGS['01_kleinbasel_drift.mid'].frames.map((f) => f.datum)) * 0.5);
 water.position.y = IDLE_LEVEL;
 levelTarget = IDLE_LEVEL;
-let trackIdx = 0, playDur = 0, startId = 0;
+let trackIdx = 0, playDur = 0, startId = 0, gapNext = null;
 const bPlay = document.getElementById('bPlay');
 const tTitle = document.getElementById('tTitle');
 const tFill = document.getElementById('tFill');
@@ -722,8 +1182,9 @@ async function startTrack(i) {
     : waterBaseY;
   tTitle.textContent = TRACKS[trackIdx][1];
   playing = true; bPlay.textContent = '\u25A0';
+  gapNext = null;
   const my = ++startId;
-  const data = await loadSong('./music/' + TRACKS[trackIdx][0]);
+  const data = await loadSong('./' + MUSIC_DIR + '/' + TRACKS[trackIdx][0]);
   if (my !== startId || !playing) return;   // superseded by a newer click
   if (!audio) armAudio();
   const master = audio.createGain();
@@ -837,7 +1298,7 @@ function applyQuality() {
 applyQuality();
 let fpsAcc = 0, fpsN = 0;
 function tick() {
-  const rawDt = clock.getDelta();
+  const rawDt = window.__renderDt !== undefined ? window.__renderDt : clock.getDelta();
   const dt = Math.min(0.05, rawDt);
   // frame-rate sensing: ignore watchdog/hidden gaps (rawDt > 0.12)
   if (rawDt < 0.12) {
@@ -869,7 +1330,8 @@ function tick() {
     const cycle = 0.15, half = 0.075;
     // floor + song character: every song flows like the faehre he approved,
     // slow songs gently, gusts fast
-    cfg.x += (0.010 + moodCur.flow * 0.013) * dt;
+    // 1.5x the original speed - Dele 2026-08-30: "river should flow faster"
+    cfg.x += (0.015 + moodCur.flow * 0.020) * dt;
     cfg.y = cfg.x + half;
     if (cfg.x >= cycle) { cfg.x = 0; cfg.y = half; }
     else if (cfg.y >= cycle) { cfg.y -= cycle; }
@@ -878,7 +1340,10 @@ function tick() {
     // SONG MOOD: the composition is a timeline - interpolate the script's
     // keyframes at the song's progress, then chase (the chase smooths both
     // the track-change cross-fade and every keyframe step)
-    const prog = window.__progOverride !== undefined ? window.__progOverride
+    const prog = gapNext ? 0
+      : window.__progOverride !== undefined ? window.__progOverride
+      : (RENDER_MODE && song && playDur > 0)
+      ? Math.min(1, Math.max(0, renderT / playDur))
       : (playDur > 0 && song && audio)
       ? Math.min(1, Math.max(0, (audio.currentTime - songT0) / playDur))
       : 0;
@@ -889,7 +1354,7 @@ function tick() {
     moodWaterColor.lerp(tmpWaterC, k);
     water.material.uniforms['color'].value.copy(moodWaterColor)
       .lerp(whiteTint, 0.45);
-    deepWater.material.color.copy(moodWaterColor).multiplyScalar(1.15);
+    updateMilk();
     // (rain-roughness via scale was WRONG: scale animates about the plane
     // corner and reads as diagonal drift - reverted, Dele caught it)
     K += (moodCur.K - K) * k;
@@ -911,6 +1376,9 @@ function tick() {
       water.userData.glintU.glint.value =
         Math.min(1, moodCur.sunInt / 5) * 0.35 *
         Math.min(1, moodCur.el / 50);   // kept restrained everywhere - Dele's taste
+      water.userData.glintU.rainAmt.value = Math.min(1, moodCur.rain);
+      milkUni.value = moodCur.milk || 0;
+      water.userData.glintU.rainT.value = breathT;
     }
     sky.material.uniforms.sunPosition.value.copy(
       moodCur.skyBelow > 0.5
@@ -923,7 +1391,7 @@ function tick() {
   moodWaterColor.lerp(idleWaterColor, Math.min(1, dt / 5));
   water.material.uniforms['color'].value.copy(moodWaterColor)
     .lerp(whiteTint, 0.45);
-  deepWater.material.color.copy(moodWaterColor).multiplyScalar(1.15);
+  updateMilk();
   const CYCLE = 1320, DAYFRAC = 1200 / 1320;
   const u = (breathT % CYCLE) / CYCLE;
   let sd, warm, inten, hemiI, envI;
@@ -960,18 +1428,22 @@ function tick() {
     .multiplyScalar(Math.min(1, Math.max(0.12, moodCur.sunInt / 4)));
   rain.visible = moodCur.rain > 0.03;
   if (rain.visible) {
-    rain.material.opacity = Math.min(1, moodCur.rain * 0.85);
+    // the wind gusts: slant and density breathe on two slow sines
+    const gust = 1 + 0.55 * Math.sin(breathT * 0.31) + 0.3 * Math.sin(breathT * 1.07);
+    const slG = rain.userData.slant * gust;
+    rain.material.opacity = Math.min(1, moodCur.rain * 0.45) *
+      (0.86 + 0.14 * Math.sin(breathT * 1.9 + 1.3));
     const pa = rain.geometry.attributes.position, vv = rain.userData.vel,
-          ll = rain.userData.lens, sl = rain.userData.slant;
+          ll = rain.userData.lens;
     for (let i = 0; i < vv.length; i++) {
       const fall = vv[i] * dt;
       let y = pa.array[i * 6 + 1] - fall;
-      let x = pa.array[i * 6] - fall * sl;   // the wind carries it sideways
+      let x = pa.array[i * 6] - fall * slG;   // the wind carries it sideways
       if (y < -5) { y += 165; }
       if (x < -304) x += 360; else if (x > 56) x -= 360;
       pa.array[i * 6] = x;
       pa.array[i * 6 + 1] = y;
-      pa.array[i * 6 + 3] = x + ll[i] * sl;
+      pa.array[i * 6 + 3] = x + ll[i] * slG;
       pa.array[i * 6 + 4] = y + ll[i];
     }
     pa.needsUpdate = true;
@@ -989,6 +1461,11 @@ function tick() {
   // THE LEVEL (Dele 2026-08-30): locked per song. On a song change the
   // water glides swiftly to the new level (1.4 m/s, dead stop, zero
   // oscillation) and then does not move again until the next song.
+  // wet stone soaks while it rains and dries over ~45 s - so schnitt opens
+  // on stone the overcast downpour has only just washed (unconditional:
+  // an earlier version only updated this while idle, a bug)
+  rainWet = Math.max(rainWet - dt / 45, Math.min(1, moodCur.rain));
+  rainUni.value = rainWet;
   musicEnergy *= Math.exp(-dt / 6);   // still feeds the springs' feel
   {
     const err = levelTarget - water.position.y;
@@ -1022,20 +1499,23 @@ function tick() {
   }
   // LOCKED VIEW: the frame is 16:9 always - wider windows get black
   // pillars instead of revealing world beyond Dele's framing
-  const AR = 16 / 9;
-  let w = innerWidth, h = innerHeight;
-  if (w / h > AR) w = Math.round(h * AR); else h = Math.round(w / AR);
-  if (canvas.style.width !== w + 'px') {
-    canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  let w = 1, h = 1;
+  if (!RENDER_MODE) {   // the render loop owns the frame size itself
+    const AR = 16 / 9;
+    w = innerWidth; h = innerHeight;
+    if (w / h > AR) w = Math.round(h * AR); else h = Math.round(w / AR);
+    if (canvas.style.width !== w + 'px') {
+      canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+    }
+    if (canvas.width !== w * renderer.getPixelRatio() ||
+        canvas.height !== h * renderer.getPixelRatio()) {
+      renderer.setSize(w, h, false);
+      composer.setSize(w, h);
+      camera.aspect = AR; camera.updateProjectionMatrix();
+    }
   }
-  if (canvas.width !== w * renderer.getPixelRatio() ||
-      canvas.height !== h * renderer.getPixelRatio()) {
-    renderer.setSize(w, h, false);
-    composer.setSize(w, h);
-    camera.aspect = AR; camera.updateProjectionMatrix();
-  }
-  if (playing && song && audio) {
-    const pos = audio.currentTime - songT0;
+  if (playing && song && (audio || RENDER_MODE)) {
+    const pos = RENDER_MODE ? renderT : audio.currentTime - songT0;
     // visual strikes fire from the audio clock itself - always in sync
     while (visPtr < song.notes.length && song.notes[visPtr].sec <= pos) {
       const n = song.notes[visPtr++];
@@ -1044,19 +1524,33 @@ function tick() {
     tFill.style.width =
       (Math.min(1, Math.max(0, pos / Math.max(0.001, playDur))) * 100)
         .toFixed(2) + '%';
-    if (pos > playDur + 2.5) startTrack(trackIdx + 1);
+    // THE TRANSITIONS (Dele: the most interesting times): six seconds of
+    // silence between songs (was ten - "a bit too long", 2026-08-30),
+    // during which the world already turns toward
+    // the NEXT piece - the music then enters an already-changed world
+    if (pos > playDur + 1 && !gapNext) {
+      const nx = ((trackIdx + 1) % TRACKS.length + TRACKS.length) % TRACKS.length;
+      gapNext = SONGS[TRACKS[nx][0]] || null;
+      if (gapNext) {
+        moodTarget = gapNext;
+        levelTarget = Math.min(13, waterBaseY +
+          Math.max(...gapNext.frames.map((fr) => fr.datum)) * 0.5);
+      }
+    }
+    if (!RENDER_MODE && pos > playDur + 6) startTrack(trackIdx + 1);
   } else if (!playing) { tFill.style.width = '0%'; }
   // a transient render error (e.g. zero-size canvas while the window is
   // hidden) must never kill the loop - the rAF chain is the heartbeat
-  if (w > 0 && h > 0) { try { composer.render(); } catch (e) {} }
+  if (!RENDER_MODE && w > 0 && h > 0) { try { composer.render(); } catch (e) {} }
   lastTickMs = performance.now();
-  requestAnimationFrame(tick);
+  if (window.__renderDt === undefined) requestAnimationFrame(tick);
 }
 // WATCHDOG: some embedded/hidden windows never fire requestAnimationFrame;
 // keep a slow heartbeat so the piece is alive (and in sync) when seen again
 let lastTickMs = 0;
 setInterval(() => {
-  if (performance.now() - lastTickMs > 400) tick();
+  if (window.__renderDt === undefined &&
+      performance.now() - lastTickMs > 400) tick();
 }, 150);
 document.getElementById('status').textContent = `${parts.length} keys`;
 // bank sides in Dele's frame: L and R of the channel - the two voices
