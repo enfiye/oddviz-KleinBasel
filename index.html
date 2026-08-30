@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the bank — kleinbasel</title>
+<style>
+  :root { --ink: #d8d2c8; --gold: #cbb98a; --bg: #0b0e12; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+               font: 13px/1.5 'Consolas', ui-monospace, monospace; color: var(--ink); }
+  #c { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); }
+
+  /* ---- transport bar ---- */
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 52px;
+    display: flex; align-items: center; gap: 16px; padding: 0 22px;
+    background: linear-gradient(180deg, #0d111acc, #090c12ee);
+    backdrop-filter: blur(8px); user-select: none;
+    opacity: 0; transition: opacity 1.2s; }
+  body.entered #bar { opacity: 1; }
+  #bar button { font: 15px/1 'Consolas', ui-monospace, monospace; background: none;
+    color: var(--ink); border: none; cursor: pointer; padding: 6px 7px;
+    opacity: .8; transition: opacity .2s; }
+  #bar button:hover { opacity: 1; }
+  #tTitle { letter-spacing: .22em; font-size: 11px; text-transform: lowercase;
+    opacity: .85; white-space: nowrap; }
+  #tRail { flex: 1; height: 1px; background: #2a3040; }
+  #tFill { height: 100%; width: 0%; background: var(--gold);
+    transition: width .3s linear; }
+  #status { opacity: .35; font-size: 11px; letter-spacing: .08em; }
+  #bLow, #bHigh { font-size: 10px !important; letter-spacing: .18em; }
+  #bInfo { font-size: 12px !important; opacity: .5 !important; }
+  #bInfo:hover { opacity: .9 !important; }
+
+  /* ---- corner title ---- */
+  #title { position: fixed; left: 18px; top: 16px; letter-spacing: .3em;
+    font-size: 11px; opacity: 0; user-select: none; transition: opacity 1.2s; }
+  body.entered #title { opacity: .5; }
+
+  /* ---- the gate (arrival) ---- */
+  #gate { position: fixed; inset: 0; background: var(--bg); z-index: 10;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 0; transition: opacity 1.4s; cursor: default; }
+  #gTitle { font-family: ui-sans-serif, system-ui, 'Segoe UI', sans-serif;
+    font-size: clamp(28px, 5vw, 54px); font-weight: 200;
+    letter-spacing: .55em; text-indent: .55em; color: #e8e2d6; }
+  #gSub { font-family: ui-sans-serif, system-ui, 'Segoe UI', sans-serif;
+    font-size: clamp(11px, 1.4vw, 15px); font-weight: 300;
+    letter-spacing: .8em; text-indent: .8em; opacity: .55; margin-top: 14px; }
+  #gPremise { font-size: 12px; letter-spacing: .12em; opacity: .45;
+    margin-top: 46px; }
+  #gLoad { font-size: 11px; letter-spacing: .14em; opacity: .35;
+    margin-top: 40px; min-height: 18px; }
+  #gEnter { font-size: 12px; letter-spacing: .5em; text-indent: .5em;
+    margin-top: 40px; padding: 12px 34px; border: 1px solid #3a4152;
+    color: var(--gold); opacity: 0; cursor: pointer; user-select: none;
+    transition: opacity 1s, border-color .3s; pointer-events: none; }
+  #gEnter.ready { opacity: .9; pointer-events: auto;
+    animation: breathe 3.2s ease-in-out infinite; }
+  #gEnter:hover { border-color: var(--gold); }
+  @keyframes breathe { 50% { opacity: .45; } }
+  #gCredit { position: absolute; bottom: 26px; font-size: 10px;
+    letter-spacing: .3em; opacity: .3; }
+
+  /* ---- about overlay ---- */
+  #about { position: fixed; inset: 0; z-index: 9; background: #0b0e12f2;
+    display: none; align-items: center; justify-content: center;
+    cursor: pointer; }
+  #about.open { display: flex; }
+  #aBox { max-width: 520px; padding: 0 30px; line-height: 2.1;
+    font-size: 12px; letter-spacing: .08em; opacity: .85; cursor: default; }
+  #aBox h2 { font-family: ui-sans-serif, system-ui, 'Segoe UI', sans-serif;
+    font-weight: 200; letter-spacing: .4em; font-size: 20px; color: #e8e2d6; }
+  #aBox .dim { opacity: .5; }
+
+  /* ---- one-time hint ---- */
+  #hint { position: fixed; left: 50%; bottom: 68px; transform: translateX(-50%);
+    font-size: 11px; letter-spacing: .22em; opacity: 0; transition: opacity 1.2s;
+    pointer-events: none; }
+  #hint.show { opacity: .55; }
+
+  /* ---- vignette ---- */
+  #vig { position: fixed; inset: 0; pointer-events: none; z-index: 4;
+    background: radial-gradient(ellipse at 50% 46%,
+      transparent 58%, rgba(0,0,0,.30) 100%);
+    opacity: 0; transition: opacity 1.4s; }
+  body.entered #vig { opacity: 1; }
+
+  /* ---- kiosk (exhibition) mode ---- */
+  .kiosk #bar, .kiosk #title, .kiosk #hint { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="title">THE BANK — KLEINBASEL</div>
+<div id="bar">
+  <button id="bPrev" title="previous">⏴</button>
+  <button id="bPlay" title="play">▶</button>
+  <button id="bNext" title="next">⏵</button>
+  <span id="tTitle"></span>
+  <div id="tRail"><div id="tFill"></div></div>
+  <span id="status"></span>
+  <button id="bLow" title="runs anywhere">LOW</button>
+  <button id="bHigh" title="full render">HIGH</button>
+  <button id="bInfo" title="about">i</button>
+</div>
+<div id="vig"></div>
+<div id="hint">the keys can be struck</div>
+<div id="about"><div id="aBox">
+  <h2>THE BANK</h2>
+  <p>the kleinbasel bank of the rhine, scanned in three hundred and sixty
+  degrees, cut into fifty-three keys and returned to its place — an
+  instrument played by its own score.</p>
+  <p>seven songs recompose the world: the light, the weather, the river's
+  level and pace. the keys can be struck by hand.</p>
+  <p class="dim">album one — delememed · 2026<br>
+  photogrammetry, composition and build: delememed</p>
+</div></div>
+<div id="gate">
+  <div id="gTitle">THE BANK</div>
+  <div id="gSub">KLEINBASEL</div>
+  <div id="gPremise">a scanned riverbank, played by its own score</div>
+  <div id="gLoad">assembling the bank</div>
+  <div id="gEnter">ENTER</div>
+  <div id="gCredit">DELEMEMED — 2026</div>
+</div>
+<!-- self-contained: three.js is bundled; the piece needs no network -->
+<script type="module" src="./bundle.js?v=1788111622"></script>
+</body>
+</html>
