@@ -12,11 +12,33 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
-window.__SEAMV = '1788112079';
+window.__SEAMV = '1788112482';
 // QUALITY TIERS (Dele 2026-08-30): LOW is the default and must run on
 // laptops and phones; HIGH is the full installation render, one click away.
-let QUALITY = 'low';
-try { QUALITY = localStorage.getItem('seamQuality') || 'low'; } catch (e) {}
+// default tier (Dele): phones and laptops LOW, desktops HIGH. A browser
+// cannot know the chassis, but the GPU name can: discrete desktop cards
+// say GeForce/RTX/Radeon RX; laptop variants say Laptop/Max-Q; integrated
+// and Apple silicon read as laptops. An explicit button choice always wins.
+let QUALITY = null;
+try { QUALITY = localStorage.getItem('seamQuality'); } catch (e) {}
+if (!QUALITY && new URLSearchParams(location.search).get('tier') === 'low') {
+  QUALITY = 'low';
+}
+const AUTO_TIER = !QUALITY;
+if (!QUALITY) {
+  let gpu = '';
+  try {
+    const probe = document.createElement('canvas').getContext('webgl2');
+    const ext = probe && probe.getExtension('WEBGL_debug_renderer_info');
+    if (ext) gpu = String(probe.getParameter(ext.UNMASKED_RENDERER_WEBGL));
+  } catch (e) {}
+  const mobileUA = /Android|iPhone|iPad|Mobi/i.test(navigator.userAgent) ||
+    (navigator.maxTouchPoints > 2 && screen.width < 1100);
+  const desktopGPU = /GeForce|RTX \d|GTX \d|Radeon RX|Radeon PRO W|Arc A\d/i.test(gpu) &&
+    !/laptop|mobile|max-q/i.test(gpu);
+  QUALITY = (!mobileUA && desktopGPU) ? 'high' : 'low';
+  console.log('auto tier:', QUALITY, '(gpu: ' + gpu + ')');
+}
 const HI = QUALITY === 'high';
 
 // ---------------------------------------------------------------- scene --
@@ -814,6 +836,16 @@ function tick() {
       const fps = fpsN / fpsAcc;
       fpsAcc = 0; fpsN = 0;
       if (fps < 45 && qLevel < Q_PR.length - 1) { qLevel++; applyQuality(); }
+      // an auto-chosen HIGH that stutters demotes itself to LOW once
+      // (never overrides an explicit button choice)
+      if (HI && AUTO_TIER && fps < 33 &&
+          !sessionStorage.getItem('seamDemoted')) {
+        try {
+          sessionStorage.setItem('seamDemoted', '1');
+          localStorage.removeItem('seamQuality');
+        } catch (e) {}
+        location.replace(location.pathname + '?tier=low' + location.hash);
+      }
     }
   }
   // the idle breath: a slow swell wanders along the bank so the
