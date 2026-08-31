@@ -12,7 +12,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
-window.__SEAMV = '1788126166';
+window.__SEAMV = '1788154610';
 // QUALITY TIERS (Dele 2026-08-30): LOW is the default and must run on
 // laptops and phones; HIGH is the full installation render, one click away.
 // default tier (Dele): phones and laptops LOW, desktops HIGH. A browser
@@ -516,13 +516,32 @@ async function postWithRetry(url, body) {
   throw new Error('upload failed after retries: ' + url);
 }
 async function runRender() {
-  const RCV = 'http://localhost:8091';
-  const gate = document.getElementById('gate');
-  if (gate) gate.remove();
+  const gate0 = document.getElementById('gate');
+  if (gate0) gate0.remove();
   document.body.classList.add('entered');
   document.documentElement.classList.add('kiosk');   // no chrome in frames
+  if (RQ.get('render') === 'film') {
+    // THE FILM, unattended (Dele 2026-08-31: "push first then start the
+    // render"): all seven takes back to back. Each take renders its song
+    // plus the 6 s silence in which the world turns toward the next piece;
+    // the final take stops 0.5 s after its last note so the wrap toward
+    // track 1 never reaches a frame.
+    for (let i = 0; i < TRACKS.length; i++) {
+      await renderTake(i, 'film_' + String(i + 1).padStart(2, '0'),
+                       i === TRACKS.length - 1 ? 0.5 : 6);
+    }
+    document.title = 'FILM RENDER DONE';
+    const st = document.getElementById('status');
+    if (st) st.textContent = 'FILM RENDER DONE';
+    return;
+  }
+  await renderTake(R_SONG, R_TAKE, null);
+}
+async function renderTake(songIdx, takeName, gapTail) {
+  const RCV = 'http://localhost:8091';
+  gapNext = null;   // a previous take's gap must not pin prog to 0
   // load the song's score and world without any AudioContext
-  trackIdx = ((R_SONG % TRACKS.length) + TRACKS.length) % TRACKS.length;
+  trackIdx = ((songIdx % TRACKS.length) + TRACKS.length) % TRACKS.length;
   moodTarget = SONGS[TRACKS[trackIdx][0]] || null;
   levelTarget = moodTarget
     ? Math.min(13, waterBaseY +
@@ -560,7 +579,8 @@ async function runRender() {
   const acc = document.createElement('canvas');
   acc.width = R_W; acc.height = R_H;
   const actx = acc.getContext('2d');
-  const frames = Math.round(R_DUR * R_FPS);
+  const durS = gapTail !== null ? playDur + gapTail : R_DUR;
+  const frames = Math.round(durS * R_FPS);
   const status = document.getElementById('status');
   for (let f = 0; f < frames; f++) {
     // half shutter: substeps across the first half of the frame interval
@@ -577,19 +597,22 @@ async function runRender() {
     window.__renderDt = 0.5 / R_FPS;
     renderT += window.__renderDt;
     tick();
-    const blob = await new Promise((r) => acc.toBlob(r, 'image/jpeg', 0.95));
-    await postWithRetry(RCV + '/frame?take=' + R_TAKE + '&n=' + f, blob);
+    // base64 string, NOT a Blob: Chrome's blob storage filled at ~2.1 GB
+    // (766 frames) overnight and killed the film with BLOB_OUT_OF_MEMORY -
+    // strings live on the normal GC heap and cannot accumulate
+    const dataUrl = acc.toDataURL('image/jpeg', 0.95);
+    await postWithRetry(RCV + '/frame?take=' + takeName + '&n=' + f, dataUrl);
     if (status && f % 10 === 0) {
-      status.textContent = 'rendering ' + f + ' / ' + frames;
-      document.title = 'render ' + f + '/' + frames;
+      status.textContent = takeName + ': ' + f + ' / ' + frames;
+      document.title = takeName + ' ' + f + '/' + frames;
     }
   }
   // sound: the same score, sample-accurate, rendered offline
   status.textContent = 'rendering sound\u2026';
-  const wav = await renderAudioWindow(song, R_START, R_DUR + 2.0);
-  await postWithRetry(RCV + '/audio?take=' + R_TAKE, wav);
-  status.textContent = 'RENDER DONE \u2014 ' + frames + ' frames';
-  document.title = 'RENDER DONE';
+  const wav = await renderAudioWindow(song, R_START, durS + 2.0);
+  await postWithRetry(RCV + '/audio?take=' + takeName, wav);
+  status.textContent = takeName + ' DONE \u2014 ' + frames + ' frames';
+  document.title = takeName + ' DONE';
 }
 
 async function renderAudioWindow(sng, start, dur) {
@@ -1306,10 +1329,13 @@ function tick() {
     if (fpsAcc > 4) {
       const fps = fpsN / fpsAcc;
       fpsAcc = 0; fpsN = 0;
-      if (fps < 45 && qLevel < Q_PR.length - 1) { qLevel++; applyQuality(); }
+      // NEVER inside a render: the ladder would soften frames and the
+      // demotion RELOADS the page - it killed the first film smoke test
+      // by replacing the ?render URL with ?tier=low
+      if (!RENDER_MODE && fps < 45 && qLevel < Q_PR.length - 1) { qLevel++; applyQuality(); }
       // an auto-chosen HIGH that stutters demotes itself to LOW once
       // (never overrides an explicit button choice)
-      if (HI && AUTO_TIER && fps < 33 &&
+      if (!RENDER_MODE && HI && AUTO_TIER && fps < 33 &&
           !sessionStorage.getItem('seamDemoted')) {
         try {
           sessionStorage.setItem('seamDemoted', '1');
